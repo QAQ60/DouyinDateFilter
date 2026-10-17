@@ -6,11 +6,10 @@
 #import "rg_date_filter.h"
 
 static NSString *const kDDFDaysKey = @"DDFDays";
+static NSString *const kDDFHostKey = "ddf.host";
 
-static char kDDFPillKey;
-static char kDDFBallKey;
+static char kDDFSettingsEntryKey;
 static __weak id gDDFLastController;
-static __weak UIViewController *gDDFLastProfile;
 
 #pragma mark - Douyin model plumbing
 
@@ -48,8 +47,6 @@ static BOOL DDFIsProfilePostsController(id controller)
         [name containsString:@"UserWork"]) {
         return YES;
     }
-    // Newer builds rename the controller but keep it user scoped. Exclude the
-    // liked/collected lists, which are also user scoped but must stay unfiltered.
     if ([name containsString:@"User"] &&
         ![name containsString:@"Like"] &&
         ![name containsString:@"Collect"] &&
@@ -61,8 +58,7 @@ static BOOL DDFIsProfilePostsController(id controller)
 
 static NSMutableArray *DDFVisibleList(id controller)
 {
-    // calculateFilteredDataSource builds the list the grid actually renders;
-    // keeping dataSource untouched makes the filter fully reversible.
+    // Keeping dataSource untouched makes the filter fully reversible.
     @try {
         id filtered = [controller valueForKey:@"filteredDataSource"];
         if ([filtered isKindOfClass:[NSMutableArray class]]) return filtered;
@@ -102,8 +98,6 @@ static void DDFApplyFilter(id controller)
     }
 }
 
-#pragma mark - Hooks
-
 static IMP gDDFOriginalCalculate;
 
 static void DDFCalculateHook(id self, SEL _cmd)
@@ -115,64 +109,108 @@ static void DDFCalculateHook(id self, SEL _cmd)
     DDFApplyFilter(self);
 }
 
-static void DDFHookClass(Class cls, SEL selector, IMP replacement, IMP *original)
-{
-    if (!cls) return;
-    Method method = class_getInstanceMethod(cls, selector);
-    if (!method) return;
-    *original = method_getImplementation(method);
-    method_setImplementation(method, replacement);
-    NSLog(@"[DDF] hooked %@ %@", NSStringFromClass(cls), NSStringFromSelector(selector));
-}
+#pragma mark - Diagnostics
 
-#pragma mark - Settings
-
-static NSString *DDFTitleForCurrentValue(void)
+static NSArray<NSString *> *DDFCandidateClassNames(void)
 {
-    double days = [[NSUserDefaults standardUserDefaults] doubleForKey:kDDFDaysKey];
-    if (fabs(days) < 0.0001) return @"时间过滤";
-    if (days > 0) return [NSString stringWithFormat:@"%g 天内", days];
-    return [NSString stringWithFormat:@"%g 天以前", fabs(days)];
-}
+    int count = objc_getClassList(NULL, 0);
+    if (count <= 0) return @[];
+    Class *classes = (Class *)malloc(sizeof(Class) * count);
+    if (!classes) return @[];
+    count = objc_getClassList(classes, count);
 
-static UIWindow *DDFKeyWindow(void)
-{
-    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
-        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
-            if (window.isKeyWindow) return window;
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (int i = 0; i < count; i++) {
+        NSString *name = NSStringFromClass(classes[i]);
+        if (![name hasPrefix:@"AWE"]) continue;
+        if ([name containsString:@"DataController"] || [name containsString:@"DataManager"]) {
+            [names addObject:name];
         }
     }
-    return UIApplication.sharedApplication.windows.firstObject;
+    free(classes);
+    [names sortUsingSelector:@selector(compare:)];
+    return names;
 }
+
+static NSString *DDFDiagnosticsText(void)
+{
+    Class listClass = objc_getClass("AWEListDataController");
+    NSArray<NSString *> *candidates = DDFCandidateClassNames();
+    NSArray *sample = candidates.count > 6 ? [candidates subarrayWithRange:NSMakeRange(0, 6)] : candidates;
+
+    NSString *controllerName = gDDFLastController
+        ? NSStringFromClass([gDDFLastController class])
+        : @"未捕获";
+
+    return [NSString stringWithFormat:
+            @"AWEListDataController：%@\n"
+            @"数据控制器：%@\n"
+            @"候选类（%lu）：\n%@",
+            listClass ? @"存在" : @"不存在",
+            controllerName,
+            (unsigned long)candidates.count,
+            sample.count ? [sample componentsJoinedByString:@"\n"] : @"无"];
+}
+
+#pragma mark - Settings entry
 
 static UIViewController *DDFTopViewController(void)
 {
-    UIViewController *controller = DDFKeyWindow().rootViewController;
+    UIWindow *window = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *candidate in ((UIWindowScene *)scene).windows) {
+            if (candidate.isKeyWindow) { window = candidate; break; }
+        }
+    }
+    if (!window) window = UIApplication.sharedApplication.windows.firstObject;
+
+    UIViewController *controller = window.rootViewController;
     while (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
         controller = controller.presentedViewController;
     }
     return controller;
 }
 
-static void DDFLogHierarchy(UIViewController *controller, NSInteger depth)
-{
-    if (!controller || depth > 4) return;
-    NSMutableString *indent = [NSMutableString string];
-    for (NSInteger i = 0; i < depth; i++) [indent appendString:@"  "];
-    NSLog(@"[DDF] %@%@", indent, NSStringFromClass([controller class]));
-    for (UIViewController *child in controller.childViewControllers) {
-        DDFLogHierarchy(child, depth + 1);
-    }
-}
-
 @interface DDFConfigurator : NSObject
 + (instancetype)shared;
 - (void)presentFrom:(UIViewController *)host;
-- (void)pillTapped:(UIButton *)sender;
-- (void)ballTapped:(UIButton *)sender;
-- (void)ballPanned:(UIPanGestureRecognizer *)pan;
+- (void)settingsTapped:(UIBarButtonItem *)sender;
 @end
+
+static void DDFAddSettingsEntry(UIViewController *controller)
+{
+    if (!controller) return;
+    NSString *name = NSStringFromClass([controller class]);
+    if ([name rangeOfString:@"Setting" options:NSCaseInsensitiveSearch].location == NSNotFound) return;
+
+    UINavigationItem *navigationItem = controller.navigationItem;
+    if (!navigationItem) return;
+    if (objc_getAssociatedObject(controller, &kDDFSettingsEntryKey)) return;
+
+    UIBarButtonItem *item = [[UIBarButtonItem alloc] initWithTitle:@"时间过滤"
+                                                             style:UIBarButtonItemStylePlain
+                                                            target:[DDFConfigurator shared]
+                                                            action:@selector(settingsTapped:)];
+    objc_setAssociatedObject(item, kDDFHostKey.UTF8String, controller, OBJC_ASSOCIATION_ASSIGN);
+
+    NSMutableArray *items = [navigationItem.rightBarButtonItems mutableCopy] ?: [NSMutableArray array];
+    [items insertObject:item atIndex:0];
+    navigationItem.rightBarButtonItems = items;
+
+    objc_setAssociatedObject(controller, &kDDFSettingsEntryKey, item, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSLog(@"[DDF] settings entry added to %@", name);
+}
+
+static IMP gDDFOriginalUIViewControllerAppear;
+
+static void DDFAppearHook(id self, SEL _cmd, BOOL animated)
+{
+    if (gDDFOriginalUIViewControllerAppear) {
+        ((void (*)(id, SEL, BOOL))gDDFOriginalUIViewControllerAppear)(self, _cmd, animated);
+    }
+    DDFAddSettingsEntry(self);
+}
 
 @implementation DDFConfigurator
 
@@ -182,6 +220,12 @@ static void DDFLogHierarchy(UIViewController *controller, NSInteger depth)
     static dispatch_once_t once;
     dispatch_once(&once, ^{ shared = [DDFConfigurator new]; });
     return shared;
+}
+
+- (void)settingsTapped:(UIBarButtonItem *)sender
+{
+    UIViewController *host = objc_getAssociatedObject(sender, kDDFHostKey.UTF8String);
+    [self presentFrom:host ?: DDFTopViewController()];
 }
 
 - (void)presentFrom:(UIViewController *)host
@@ -210,17 +254,12 @@ static void DDFLogHierarchy(UIViewController *controller, NSInteger depth)
     [alert addAction:[UIAlertAction actionWithTitle:@"诊断"
                                               style:UIAlertActionStyleDefault
                                             handler:^(__unused UIAlertAction *action) {
-        UIViewController *top = DDFTopViewController();
-        DDFLogHierarchy(top, 0);
-        id controller = gDDFLastController;
-        NSString *detail = [NSString stringWithFormat:@"当前页面：%@\n数据控制器：%@",
-                            NSStringFromClass([top class]),
-                            controller ? NSStringFromClass([controller class]) : @"未捕获"];
+        NSLog(@"[DDF] %@", DDFDiagnosticsText());
         UIAlertController *info = [UIAlertController alertControllerWithTitle:@"诊断（已写入日志）"
-                                                                     message:detail
+                                                                     message:DDFDiagnosticsText()
                                                               preferredStyle:UIAlertControllerStyleAlert];
         [info addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
-        [top presentViewController:info animated:YES completion:nil];
+        [DDFTopViewController() presentViewController:info animated:YES completion:nil];
     }]];
 
     [host presentViewController:alert animated:YES completion:nil];
@@ -288,180 +327,85 @@ static void DDFLogHierarchy(UIViewController *controller, NSInteger depth)
     [[NSUserDefaults standardUserDefaults] setDouble:days forKey:kDDFDaysKey];
     [[NSUserDefaults standardUserDefaults] synchronize];
 
-    UIButton *pill = objc_getAssociatedObject(host, &kDDFPillKey);
-    [pill setTitle:DDFTitleForCurrentValue() forState:UIControlStateNormal];
-
-    // Rebuild from the untouched dataSource, then re-apply the new range.
     id controller = gDDFLastController;
     if ([controller respondsToSelector:@selector(calculateFilteredDataSource)]) {
         ((void (*)(id, SEL))objc_msgSend)(controller, @selector(calculateFilteredDataSource));
     }
-    @try {
-        UICollectionView *collectionView = [host valueForKey:@"collectionView"];
-        [collectionView reloadData];
-    } @catch (__unused NSException *exception) {
-    }
-}
-
-- (void)ballTapped:(UIButton *)sender
-{
-    [self presentFrom:DDFTopViewController()];
-}
-
-- (void)ballPanned:(UIPanGestureRecognizer *)pan
-{
-    UIView *ball = pan.view;
-    UIWindow *window = ball.window;
-    if (!ball || !window) return;
-
-    CGPoint translation = [pan translationInView:window];
-    CGPoint center = CGPointMake(ball.center.x + translation.x, ball.center.y + translation.y);
-    [pan setTranslation:CGPointZero inView:window];
-
-    CGFloat half = ball.bounds.size.width / 2;
-    center.x = MAX(half + 4, MIN(window.bounds.size.width - half - 4, center.x));
-    center.y = MAX(half + 60, MIN(window.bounds.size.height - half - 40, center.y));
-    ball.center = center;
-
-    if (pan.state == UIGestureRecognizerStateEnded) {
-        CGFloat targetX = (center.x < window.bounds.size.width / 2)
-            ? half + 8
-            : window.bounds.size.width - half - 8;
-        [UIView animateWithDuration:0.2 animations:^{
-            ball.center = CGPointMake(targetX, center.y);
-        }];
-    }
-}
-
-- (void)pillTapped:(UIButton *)sender
-{
-    UIViewController *host = gDDFLastProfile;
-    if (!host) {
-        UIResponder *responder = sender;
-        while (responder && ![responder isKindOfClass:[UIViewController class]]) {
-            responder = [responder nextResponder];
-        }
-        host = (UIViewController *)responder;
-    }
-    [self presentFrom:host];
 }
 
 @end
 
-static void DDFInstallBall(void)
+#pragma mark - Bootstrap
+
+static void DDFHookClass(Class cls, SEL selector, IMP replacement, IMP *original)
 {
-    UIWindow *window = DDFKeyWindow();
-    if (!window) return;
-    if (objc_getAssociatedObject(window, &kDDFBallKey)) return;
-
-    UIButton *ball = [UIButton buttonWithType:UIButtonTypeCustom];
-    ball.frame = CGRectMake(window.bounds.size.width - 56, window.bounds.size.height * 0.52, 44, 44);
-    ball.backgroundColor = [UIColor colorWithWhite:0 alpha:0.62];
-    ball.layer.cornerRadius = 22;
-    ball.layer.borderWidth = 1;
-    ball.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.28].CGColor;
-    ball.clipsToBounds = YES;
-    ball.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-    [ball setTitle:@"过滤" forState:UIControlStateNormal];
-    [ball setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    [ball addTarget:[DDFConfigurator shared]
-             action:@selector(ballTapped:)
-   forControlEvents:UIControlEventTouchUpInside];
-
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[DDFConfigurator shared]
-                                                                        action:@selector(ballPanned:)];
-    [ball addGestureRecognizer:pan];
-
-    [window addSubview:ball];
-    objc_setAssociatedObject(window, &kDDFBallKey, ball, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    NSLog(@"[DDF] floating ball installed on %@", NSStringFromClass([window class]));
+    if (!cls) return;
+    Method method = class_getInstanceMethod(cls, selector);
+    if (!method) return;
+    *original = method_getImplementation(method);
+    method_setImplementation(method, replacement);
+    NSLog(@"[DDF] hooked %@ %@", NSStringFromClass(cls), NSStringFromSelector(selector));
 }
 
-#pragma mark - Entry pill
-
-static void DDFAttachPill(UIViewController *controller)
+// Settings controllers that override viewDidAppear: without calling super would
+// miss a UIViewController-level swizzle, so give each its own block hook.
+static void DDFHookSettingsClasses(void)
 {
-    if (!controller || !controller.view) return;
-    if (objc_getAssociatedObject(controller, &kDDFPillKey)) return;
+    int count = objc_getClassList(NULL, 0);
+    if (count <= 0) return;
 
-    UIButton *pill = [UIButton buttonWithType:UIButtonTypeSystem];
-    pill.backgroundColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.12 alpha:0.88];
-    [pill setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-    pill.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
-    pill.layer.cornerRadius = 15;
-    pill.layer.borderWidth = 1;
-    pill.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.18].CGColor;
-    pill.clipsToBounds = YES;
-    [pill setTitle:DDFTitleForCurrentValue() forState:UIControlStateNormal];
-    [pill addTarget:[DDFConfigurator shared]
-             action:@selector(pillTapped:)
-   forControlEvents:UIControlEventTouchUpInside];
+    Class *classes = (Class *)malloc(sizeof(Class) * count);
+    if (!classes) return;
+    count = objc_getClassList(classes, count);
 
-    CGFloat top = controller.view.safeAreaInsets.top + 54;
-    CGFloat width = 86;
-    pill.frame = CGRectMake(controller.view.bounds.size.width - width - 12, top, width, 30);
-    pill.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleBottomMargin;
+    for (int i = 0; i < count; i++) {
+        Class cls = classes[i];
+        NSString *name = NSStringFromClass(cls);
+        if ([name rangeOfString:@"Setting" options:NSCaseInsensitiveSearch].location == NSNotFound) continue;
 
-    [controller.view addSubview:pill];
-    objc_setAssociatedObject(controller, &kDDFPillKey, pill, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
+        SEL selector = @selector(viewDidAppear:);
+        unsigned int methodCount = 0;
+        Method *methods = class_copyMethodList(cls, &methodCount);
+        BOOL owns = NO;
+        for (unsigned int j = 0; j < methodCount; j++) {
+            if (sel_isEqual(method_getName(methods[j]), selector)) { owns = YES; break; }
+        }
+        free(methods);
+        if (!owns) continue;
 
-static IMP gDDFOriginalViewDidAppear;
+        Method method = class_getInstanceMethod(cls, selector);
+        if (!method) continue;
 
-static void DDFViewDidAppearHook(id self, SEL _cmd, BOOL animated)
-{
-    if (gDDFOriginalViewDidAppear) {
-        ((void (*)(id, SEL, BOOL))gDDFOriginalViewDidAppear)(self, _cmd, animated);
+        IMP original = method_getImplementation(method);
+        IMP replacement = imp_implementationWithBlock(^(id receiver, BOOL animated) {
+            ((void (*)(id, SEL, BOOL))original)(receiver, selector, animated);
+            DDFAddSettingsEntry(receiver);
+        });
+        method_setImplementation(method, replacement);
+        NSLog(@"[DDF] settings class hooked: %@", name);
     }
-    gDDFLastProfile = self;
-    DDFAttachPill(self);
-}
-
-static void DDFScheduleBall(void)
-{
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        DDFInstallBall();
-    });
+    free(classes);
 }
 
 __attribute__((constructor))
 static void DDFInitialize(void)
 {
-    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
-                                                      object:nil
-                                                       queue:[NSOperationQueue mainQueue]
-                                                  usingBlock:^(__unused NSNotification *note) {
-        DDFScheduleBall();
-    }];
-    DDFScheduleBall();
-
     Class listController = objc_getClass("AWEListDataController");
     if (listController) {
         DDFHookClass(listController, @selector(calculateFilteredDataSource), (IMP)DDFCalculateHook, &gDDFOriginalCalculate);
+    } else {
+        NSLog(@"[DDF] AWEListDataController not found in this build");
     }
 
-    NSArray<NSString *> *profileClasses = @[ @"AWEPostWorkViewController", @"AWEUserWorkViewController" ];
-    for (NSString *name in profileClasses) {
-        Class cls = objc_getClass(name.UTF8String);
-        if (!cls) continue;
-
-        // Only touch classes that implement viewDidAppear: themselves; hooking an
-        // inherited implementation would put the pill on every controller in the app.
-        SEL selector = @selector(viewDidAppear:);
-        BOOL ownsMethod = NO;
-        unsigned int count = 0;
-        Method *methods = class_copyMethodList(cls, &count);
-        for (unsigned int i = 0; i < count; i++) {
-            if (sel_isEqual(method_getName(methods[i]), selector)) { ownsMethod = YES; break; }
-        }
-        free(methods);
-        if (!ownsMethod) continue;
-
-        Method method = class_getInstanceMethod(cls, selector);
-        if (!method) continue;
-        gDDFOriginalViewDidAppear = method_getImplementation(method);
-        method_setImplementation(method, (IMP)DDFViewDidAppearHook);
-        NSLog(@"[DDF] hooked %@ viewDidAppear:", name);
-        break;
+    Method appear = class_getInstanceMethod([UIViewController class], @selector(viewDidAppear:));
+    if (appear) {
+        gDDFOriginalUIViewControllerAppear = method_getImplementation(appear);
+        method_setImplementation(appear, (IMP)DDFAppearHook);
     }
+
+    DDFHookSettingsClasses();
+
+    NSLog(@"[DDF] ready (listController=%@, candidates=%lu)",
+          listController ? @"yes" : @"no",
+          (unsigned long)DDFCandidateClassNames().count);
 }

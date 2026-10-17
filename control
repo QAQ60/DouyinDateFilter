@@ -1,6 +1,6 @@
 Package: com.qaq60.douyindatefilter
 Name: Douyin Date Filter
-Version: 0.2.0
+Version: 0.3.0
 Architecture: iphoneos-arm
 Description: Filter the posts tab on Douyin profiles by publish date.
 Maintainer: QAQ60

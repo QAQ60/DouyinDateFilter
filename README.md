@@ -11,7 +11,7 @@
 
 **TrollFools / 自签注入（推荐）**
 
-把 `DouyinDateFilter.dylib` 注入抖音的 IPA。启动后右侧会出现一个可拖动的「过滤」悬浮球，点它就能设置天数，不依赖具体页面。
+把 `DouyinDateFilter.dylib` 注入抖音的 IPA。打开「我 → 右上角菜单 → 设置」，导航栏右上角会出现「时间过滤」按钮。
 
 **越狱**
 
@@ -32,13 +32,14 @@ scp DouyinDateFilter.plist root@device:/var/jb/Library/MobileSubstrate/DynamicLi
 - 只处理类名含 `UserPosts` / `PostWork` / `UserWork` 的控制器，首页推荐、喜欢列表不受影响
 - 取不到 `createTime` 的条目一律保留
 
-入口是窗口级悬浮球，挂在 key window 上，所以无论抖音怎么改页面结构都能看见；点开后的「诊断」会打印当前页面层级到日志。
+入口在设置页导航栏，不再有悬浮窗。点开后的「诊断」会显示 `AWEListDataController` 是否存在、当前捕获到的数据控制器，以及候选的 `*DataController` / `*DataManager` 类名。
 
 日志前缀 `[DDF]`：
 
 ```
-[DDF] floating ball installed on UIWindow
 [DDF] hooked AWEListDataController calculateFilteredDataSource
+[DDF] settings class hooked: AWESettingsViewController
+[DDF] settings entry added to AWESettingsViewController
 [DDF] AWEUserPostsDataManager: 40 -> 17 (days=10)
 ```
 
@@ -46,7 +47,7 @@ scp DouyinDateFilter.plist root@device:/var/jb/Library/MobileSubstrate/DynamicLi
 
 - **没有在真机上验证过。** 类名和字段来自公开的 class-dump 头文件（`yudun1989/Headers` 的 aweme 分支），抖音版本更新后可能改名。编译通过不代表 hook 命中，先看日志。
 - 如果 `filteredDataSource` 不是网格实际使用的数组，列表不会变化；日志里会看到 `[DDF] ... -> ...`，但界面不动，这种就需要换 hook 点。
-- 悬浮球默认在右侧中部，可拖动，重启后回到默认位置。
+- 设置页类名必须含 `Setting`，否则按钮不会出现；看日志里有没有 `settings class hooked`。
 - 分页到「全是过滤掉的」那一段时可能不再自动加载下一页。
 
 ## 构建
