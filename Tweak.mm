@@ -8,6 +8,7 @@
 static NSString *const kDDFDaysKey = @"DDFDays";
 
 static char kDDFPillKey;
+static char kDDFBallKey;
 static __weak id gDDFLastController;
 static __weak UIViewController *gDDFLastProfile;
 
@@ -42,9 +43,20 @@ static NSDate *DDFDateForAweme(id object)
 static BOOL DDFIsProfilePostsController(id controller)
 {
     NSString *name = NSStringFromClass([controller class]);
-    return [name containsString:@"UserPosts"] ||
-           [name containsString:@"PostWork"] ||
-           [name containsString:@"UserWork"];
+    if ([name containsString:@"UserPosts"] ||
+        [name containsString:@"PostWork"] ||
+        [name containsString:@"UserWork"]) {
+        return YES;
+    }
+    // Newer builds rename the controller but keep it user scoped. Exclude the
+    // liked/collected lists, which are also user scoped but must stay unfiltered.
+    if ([name containsString:@"User"] &&
+        ![name containsString:@"Like"] &&
+        ![name containsString:@"Collect"] &&
+        ![name containsString:@"Favorite"]) {
+        return YES;
+    }
+    return NO;
 }
 
 static NSMutableArray *DDFVisibleList(id controller)
@@ -123,10 +135,43 @@ static NSString *DDFTitleForCurrentValue(void)
     return [NSString stringWithFormat:@"%g 天以前", fabs(days)];
 }
 
+static UIWindow *DDFKeyWindow(void)
+{
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if (window.isKeyWindow) return window;
+        }
+    }
+    return UIApplication.sharedApplication.windows.firstObject;
+}
+
+static UIViewController *DDFTopViewController(void)
+{
+    UIViewController *controller = DDFKeyWindow().rootViewController;
+    while (controller.presentedViewController && !controller.presentedViewController.isBeingDismissed) {
+        controller = controller.presentedViewController;
+    }
+    return controller;
+}
+
+static void DDFLogHierarchy(UIViewController *controller, NSInteger depth)
+{
+    if (!controller || depth > 4) return;
+    NSMutableString *indent = [NSMutableString string];
+    for (NSInteger i = 0; i < depth; i++) [indent appendString:@"  "];
+    NSLog(@"[DDF] %@%@", indent, NSStringFromClass([controller class]));
+    for (UIViewController *child in controller.childViewControllers) {
+        DDFLogHierarchy(child, depth + 1);
+    }
+}
+
 @interface DDFConfigurator : NSObject
 + (instancetype)shared;
 - (void)presentFrom:(UIViewController *)host;
 - (void)pillTapped:(UIButton *)sender;
+- (void)ballTapped:(UIButton *)sender;
+- (void)ballPanned:(UIPanGestureRecognizer *)pan;
 @end
 
 @implementation DDFConfigurator
@@ -161,6 +206,21 @@ static NSString *DDFTitleForCurrentValue(void)
                                               style:UIAlertActionStyleDefault
                                             handler:^(__unused UIAlertAction *action) {
         [weakSelf presentInputFrom:host];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"诊断"
+                                              style:UIAlertActionStyleDefault
+                                            handler:^(__unused UIAlertAction *action) {
+        UIViewController *top = DDFTopViewController();
+        DDFLogHierarchy(top, 0);
+        id controller = gDDFLastController;
+        NSString *detail = [NSString stringWithFormat:@"当前页面：%@\n数据控制器：%@",
+                            NSStringFromClass([top class]),
+                            controller ? NSStringFromClass([controller class]) : @"未捕获"];
+        UIAlertController *info = [UIAlertController alertControllerWithTitle:@"诊断（已写入日志）"
+                                                                     message:detail
+                                                              preferredStyle:UIAlertControllerStyleAlert];
+        [info addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
+        [top presentViewController:info animated:YES completion:nil];
     }]];
 
     [host presentViewController:alert animated:YES completion:nil];
@@ -243,6 +303,36 @@ static NSString *DDFTitleForCurrentValue(void)
     }
 }
 
+- (void)ballTapped:(UIButton *)sender
+{
+    [self presentFrom:DDFTopViewController()];
+}
+
+- (void)ballPanned:(UIPanGestureRecognizer *)pan
+{
+    UIView *ball = pan.view;
+    UIWindow *window = ball.window;
+    if (!ball || !window) return;
+
+    CGPoint translation = [pan translationInView:window];
+    CGPoint center = CGPointMake(ball.center.x + translation.x, ball.center.y + translation.y);
+    [pan setTranslation:CGPointZero inView:window];
+
+    CGFloat half = ball.bounds.size.width / 2;
+    center.x = MAX(half + 4, MIN(window.bounds.size.width - half - 4, center.x));
+    center.y = MAX(half + 60, MIN(window.bounds.size.height - half - 40, center.y));
+    ball.center = center;
+
+    if (pan.state == UIGestureRecognizerStateEnded) {
+        CGFloat targetX = (center.x < window.bounds.size.width / 2)
+            ? half + 8
+            : window.bounds.size.width - half - 8;
+        [UIView animateWithDuration:0.2 animations:^{
+            ball.center = CGPointMake(targetX, center.y);
+        }];
+    }
+}
+
 - (void)pillTapped:(UIButton *)sender
 {
     UIViewController *host = gDDFLastProfile;
@@ -257,6 +347,35 @@ static NSString *DDFTitleForCurrentValue(void)
 }
 
 @end
+
+static void DDFInstallBall(void)
+{
+    UIWindow *window = DDFKeyWindow();
+    if (!window) return;
+    if (objc_getAssociatedObject(window, &kDDFBallKey)) return;
+
+    UIButton *ball = [UIButton buttonWithType:UIButtonTypeCustom];
+    ball.frame = CGRectMake(window.bounds.size.width - 56, window.bounds.size.height * 0.52, 44, 44);
+    ball.backgroundColor = [UIColor colorWithWhite:0 alpha:0.62];
+    ball.layer.cornerRadius = 22;
+    ball.layer.borderWidth = 1;
+    ball.layer.borderColor = [UIColor colorWithWhite:1 alpha:0.28].CGColor;
+    ball.clipsToBounds = YES;
+    ball.titleLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    [ball setTitle:@"过滤" forState:UIControlStateNormal];
+    [ball setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+    [ball addTarget:[DDFConfigurator shared]
+             action:@selector(ballTapped:)
+   forControlEvents:UIControlEventTouchUpInside];
+
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:[DDFConfigurator shared]
+                                                                        action:@selector(ballPanned:)];
+    [ball addGestureRecognizer:pan];
+
+    [window addSubview:ball];
+    objc_setAssociatedObject(window, &kDDFBallKey, ball, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    NSLog(@"[DDF] floating ball installed on %@", NSStringFromClass([window class]));
+}
 
 #pragma mark - Entry pill
 
@@ -298,9 +417,24 @@ static void DDFViewDidAppearHook(id self, SEL _cmd, BOOL animated)
     DDFAttachPill(self);
 }
 
+static void DDFScheduleBall(void)
+{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        DDFInstallBall();
+    });
+}
+
 __attribute__((constructor))
 static void DDFInitialize(void)
 {
+    [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                      object:nil
+                                                       queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(__unused NSNotification *note) {
+        DDFScheduleBall();
+    }];
+    DDFScheduleBall();
+
     Class listController = objc_getClass("AWEListDataController");
     if (listController) {
         DDFHookClass(listController, @selector(calculateFilteredDataSource), (IMP)DDFCalculateHook, &gDDFOriginalCalculate);
