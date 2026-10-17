@@ -70,7 +70,7 @@ static NSMutableArray *DDFVisibleList(id controller)
 static void DDFApplyFilter(id controller)
 {
     double days = [[NSUserDefaults standardUserDefaults] doubleForKey:kDDFDaysKey];
-    if (fabs(days) < 0.0001) return;
+    if (fabs(days) < RG_FILTER_MIN_DAYS) return;
     if (!DDFIsProfilePostsController(controller)) return;
 
     NSMutableArray *list = DDFVisibleList(controller);
@@ -237,7 +237,8 @@ static void DDFAppearHook(id self, SEL _cmd, BOOL animated)
         @"支持小数点\n"
         @"比如 0.5 就是判断 12 小时内\n\n"
         @"支持输入负数 比如 -10 只刷 10 天以前发布的视频\n"
-        @"（注意：输入过大可能无法加载出视频或功能无效）";
+        @"（注意：输入过大可能无法加载出视频或功能无效）\n"
+        @"最长 1 年，最短 1 分钟。";
 
     UIAlertController *alert =
         [UIAlertController alertControllerWithTitle:@"提示"
@@ -278,7 +279,7 @@ static void DDFAppearHook(id self, SEL _cmd, BOOL animated)
         field.keyboardType = UIKeyboardTypeNumbersAndPunctuation;
         field.placeholder = @"10 / 0.5 / -10";
         field.textAlignment = NSTextAlignmentCenter;
-        if (fabs(current) > 0.0001) field.text = [NSString stringWithFormat:@"%g", current];
+        if (fabs(current) >= RG_FILTER_MIN_DAYS) field.text = [NSString stringWithFormat:@"%g", current];
     }];
 
     __weak typeof(self) weakSelf = self;
@@ -303,7 +304,11 @@ static void DDFAppearHook(id self, SEL _cmd, BOOL animated)
             return;
         }
         if (result == RGParseTooLarge) {
-            [weakSelf presentError:@"太大了，建议不超过 36500 天" host:weakHost];
+            [weakSelf presentError:@"最长 1 年（365 天）" host:weakHost];
+            return;
+        }
+        if (result == RGParseTooSmall) {
+            [weakSelf presentError:@"最短 1 分钟（0.0007 天）" host:weakHost];
             return;
         }
         [weakSelf applyDays:(result == RGParseEmpty || result == RGParseZero) ? 0 : value
