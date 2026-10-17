@@ -6,7 +6,7 @@
 #import "rg_date_filter.h"
 
 static NSString *const kDDFDaysKey = @"DDFDays";
-static NSString *const kDDFHostKey = "ddf.host";
+static NSString *const kDDFHostKey = @"ddf.host";
 
 static char kDDFSettingsEntryKey;
 static __weak id gDDFLastController;
